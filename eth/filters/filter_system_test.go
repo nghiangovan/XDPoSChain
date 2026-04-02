@@ -293,6 +293,66 @@ func TestPendingTxFilter(t *testing.T) {
 	}
 }
 
+// TestFullPendingTxFilter tests whether full pending tx filters retrieve all pending
+// transactions with full data that are posted to the event mux.
+func TestFullPendingTxFilter(t *testing.T) {
+	t.Parallel()
+
+	var (
+		db           = rawdb.NewMemoryDatabase()
+		backend, sys = newTestFilterSystem(t, db, Config{})
+		api          = NewFilterAPI(sys, false)
+
+		transactions = []*types.Transaction{
+			types.NewTransaction(0, common.HexToAddress("0xb794f5ea0ba39494ce83a213fffba74279579268"), new(big.Int), 0, new(big.Int), nil),
+			types.NewTransaction(1, common.HexToAddress("0xb794f5ea0ba39494ce83a213fffba74279579268"), new(big.Int), 0, new(big.Int), nil),
+			types.NewTransaction(2, common.HexToAddress("0xb794f5ea0ba39494ce83a213fffba74279579268"), new(big.Int), 0, new(big.Int), nil),
+			types.NewTransaction(3, common.HexToAddress("0xb794f5ea0ba39494ce83a213fffba74279579268"), new(big.Int), 0, new(big.Int), nil),
+			types.NewTransaction(4, common.HexToAddress("0xb794f5ea0ba39494ce83a213fffba74279579268"), new(big.Int), 0, new(big.Int), nil),
+		}
+
+		fetchedTxs []*types.Transaction
+	)
+
+	fid0 := api.NewFullPendingTransactionFilter()
+
+	time.Sleep(1 * time.Second)
+	backend.txFeed.Send(core.NewTxsEvent{Txs: transactions})
+
+	timeout := time.Now().Add(1 * time.Second)
+	for {
+		results, err := api.GetFilterChanges(fid0)
+		if err != nil {
+			t.Fatalf("Unable to retrieve transactions: %v", err)
+		}
+
+		txs := results.([]*types.Transaction)
+		fetchedTxs = append(fetchedTxs, txs...)
+		if len(fetchedTxs) >= len(transactions) {
+			break
+		}
+		// check timeout
+		if time.Now().After(timeout) {
+			break
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if len(fetchedTxs) != len(transactions) {
+		t.Errorf("invalid number of transactions, want %d transactions(s), got %d", len(transactions), len(fetchedTxs))
+		return
+	}
+	for i := range fetchedTxs {
+		if fetchedTxs[i].Hash() != transactions[i].Hash() {
+			t.Errorf("transactions[%d] hash invalid, want %x, got %x", i, transactions[i].Hash(), fetchedTxs[i].Hash())
+		}
+		if fetchedTxs[i].Nonce() != transactions[i].Nonce() {
+			t.Errorf("transactions[%d] nonce invalid, want %d, got %d", i, transactions[i].Nonce(), fetchedTxs[i].Nonce())
+		}
+	}
+}
+
 // TestLogFilterCreation test whether a given filter criteria makes sense.
 // If not it must return an error.
 func TestLogFilterCreation(t *testing.T) {

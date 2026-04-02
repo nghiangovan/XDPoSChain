@@ -161,6 +161,9 @@ const (
 	// PendingTransactionsSubscription queries for pending transactions entering
 	// the pending state
 	PendingTransactionsSubscription
+	// FullPendingTransactionsSubscription queries full tx data for pending
+	// transactions entering the pending state
+	FullPendingTransactionsSubscription
 	// BlocksSubscription queries hashes for blocks that are imported
 	BlocksSubscription
 	// LastSubscription keeps track of the last index
@@ -187,8 +190,9 @@ type subscription struct {
 	logs      chan []*types.Log
 	txs       chan []*types.Transaction
 	headers   chan *types.Header
-	installed chan struct{} // closed when the filter is installed
-	err       chan error    // closed when the filter is uninstalled
+	txs       chan []*types.Transaction // full pending transaction data
+	installed chan struct{}             // closed when the filter is installed
+	err       chan error                // closed when the filter is uninstalled
 }
 
 // EventSystem creates subscriptions, processes events and broadcasts them to the
@@ -271,7 +275,7 @@ func (sub *Subscription) Unsubscribe() {
 	sub.unsubOnce.Do(func() {
 	uninstallLoop:
 		for {
-			// write uninstall request and consume logs/hashes. This prevents
+			// write uninstall request and consume logs/hashes/txs. This prevents
 			// the eventLoop broadcast method to deadlock when writing to the
 			// filter event channel while the subscription loop is waiting for
 			// this method to return (and thus not reading these events).
@@ -281,6 +285,7 @@ func (sub *Subscription) Unsubscribe() {
 			case <-sub.f.logs:
 			case <-sub.f.txs:
 			case <-sub.f.headers:
+			case <-sub.f.txs:
 			}
 		}
 
@@ -361,6 +366,7 @@ func (es *EventSystem) subscribeMinedPendingLogs(crit ethereum.FilterQuery, logs
 		logs:      logs,
 		txs:       make(chan []*types.Transaction),
 		headers:   make(chan *types.Header),
+		txs:       make(chan []*types.Transaction),
 		installed: make(chan struct{}),
 		err:       make(chan error),
 	}
@@ -378,6 +384,7 @@ func (es *EventSystem) subscribeLogs(crit ethereum.FilterQuery, logs chan []*typ
 		logs:      logs,
 		txs:       make(chan []*types.Transaction),
 		headers:   make(chan *types.Header),
+		txs:       make(chan []*types.Transaction),
 		installed: make(chan struct{}),
 		err:       make(chan error),
 	}
@@ -395,6 +402,7 @@ func (es *EventSystem) subscribePendingLogs(crit ethereum.FilterQuery, logs chan
 		logs:      logs,
 		txs:       make(chan []*types.Transaction),
 		headers:   make(chan *types.Header),
+		txs:       make(chan []*types.Transaction),
 		installed: make(chan struct{}),
 		err:       make(chan error),
 	}
@@ -411,6 +419,7 @@ func (es *EventSystem) SubscribeNewHeads(headers chan *types.Header) *Subscripti
 		logs:      make(chan []*types.Log),
 		txs:       make(chan []*types.Transaction),
 		headers:   headers,
+		txs:       make(chan []*types.Transaction),
 		installed: make(chan struct{}),
 		err:       make(chan error),
 	}
@@ -427,6 +436,24 @@ func (es *EventSystem) SubscribePendingTxs(txs chan []*types.Transaction) *Subsc
 		logs:      make(chan []*types.Log),
 		txs:       txs,
 		headers:   make(chan *types.Header),
+		txs:       make(chan []*types.Transaction),
+		installed: make(chan struct{}),
+		err:       make(chan error),
+	}
+	return es.subscribe(sub)
+}
+
+// SubscribeFullPendingTxs creates a subscription that writes full transaction
+// objects for transactions that enter the transaction pool.
+func (es *EventSystem) SubscribeFullPendingTxs(txs chan []*types.Transaction) *Subscription {
+	sub := &subscription{
+		id:        rpc.NewID(),
+		typ:       FullPendingTransactionsSubscription,
+		created:   time.Now(),
+		logs:      make(chan []*types.Log),
+		hashes:    make(chan []common.Hash),
+		headers:   make(chan *types.Header),
+		txs:       txs,
 		installed: make(chan struct{}),
 		err:       make(chan error),
 	}
@@ -461,6 +488,9 @@ func (es *EventSystem) handlePendingLogs(filters filterIndex, ev []*types.Log) {
 
 func (es *EventSystem) handleTxsEvent(filters filterIndex, ev core.NewTxsEvent) {
 	for _, f := range filters[PendingTransactionsSubscription] {
+		f.txs <- ev.Txs
+	}
+	for _, f := range filters[FullPendingTransactionsSubscription] {
 		f.txs <- ev.Txs
 	}
 }

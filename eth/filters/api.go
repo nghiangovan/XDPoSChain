@@ -165,6 +165,42 @@ func (api *FilterAPI) NewPendingTransactionFilter() rpc.ID {
 	return pendingTxSub.ID
 }
 
+// NewFullPendingTransactionFilter creates a filter that fetches full pending transaction
+// objects as transactions enter the pending state.
+//
+// It is part of the filter package because this filter can be used through the
+// `eth_getFilterChanges` polling method that is also used for log filters.
+func (api *FilterAPI) NewFullPendingTransactionFilter() rpc.ID {
+	var (
+		pendingTxs   = make(chan []*types.Transaction)
+		pendingTxSub = api.events.SubscribeFullPendingTxs(pendingTxs)
+	)
+
+	api.filtersMu.Lock()
+	api.filters[pendingTxSub.ID] = &filter{typ: FullPendingTransactionsSubscription, deadline: time.NewTimer(api.timeout), txs: make([]*types.Transaction, 0), s: pendingTxSub}
+	api.filtersMu.Unlock()
+
+	go func() {
+		for {
+			select {
+			case txs := <-pendingTxs:
+				api.filtersMu.Lock()
+				if f, found := api.filters[pendingTxSub.ID]; found {
+					f.txs = append(f.txs, txs...)
+				}
+				api.filtersMu.Unlock()
+			case <-pendingTxSub.Err():
+				api.filtersMu.Lock()
+				delete(api.filters, pendingTxSub.ID)
+				api.filtersMu.Unlock()
+				return
+			}
+		}
+	}()
+
+	return pendingTxSub.ID
+}
+
 // NewPendingTransactions creates a subscription that is triggered each time a
 // transaction enters the transaction pool. If fullTx is true the full tx is
 // sent to the client, otherwise the hash is sent.
@@ -194,6 +230,37 @@ func (api *FilterAPI) NewPendingTransactions(ctx context.Context, fullTx *bool) 
 				}
 			case <-rpcSub.Err():
 				pendingTxSub.Unsubscribe()
+				return
+			}
+		}
+	}()
+
+	return rpcSub, nil
+}
+
+// NewFullPendingTransactions creates a subscription that is triggered each time a
+// transaction enters the transaction pool. Unlike NewPendingTransactions which only
+// returns transaction hashes, this returns the full transaction objects.
+func (api *FilterAPI) NewFullPendingTransactions(ctx context.Context) (*rpc.Subscription, error) {
+	notifier, supported := rpc.NotifierFromContext(ctx)
+	if !supported {
+		return &rpc.Subscription{}, rpc.ErrNotificationsUnsupported
+	}
+
+	rpcSub := notifier.CreateSubscription()
+
+	go func() {
+		fullTxs := make(chan []*types.Transaction, 128)
+		fullTxSub := api.events.SubscribeFullPendingTxs(fullTxs)
+
+		for {
+			select {
+			case txs := <-fullTxs:
+				for _, tx := range txs {
+					notifier.Notify(rpcSub.ID, tx)
+				}
+			case <-rpcSub.Err():
+				fullTxSub.Unsubscribe()
 				return
 			}
 		}
@@ -480,6 +547,12 @@ func (api *FilterAPI) GetFilterChanges(id rpc.ID) (interface{}, error) {
 		case PendingTransactionsSubscription:
 			txs := f.txs
 			f.txs = nil
+		case FullPendingTransactionsSubscription:
+			txs := f.txs
+			f.txs = nil
+			if txs == nil {
+				txs = []*types.Transaction{}
+			}
 			return txs, nil
 		case LogsSubscription, MinedAndPendingLogsSubscription:
 			logs := f.logs
